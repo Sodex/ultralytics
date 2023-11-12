@@ -1,11 +1,18 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
 import numpy as np
+from collections import deque
 
 from .basetrack import BaseTrack, TrackState
 from .utils import matching
 from .utils.kalman_filter import KalmanFilterXYAH
 
+class TrackMovementDirection:
+    """Enumeration of possible object tracking directions of movement."""
+
+    Incoming = 0
+    Outcoming = 1
+    DoesNotMove = 2
 
 class STrack(BaseTrack):
     """
@@ -55,6 +62,9 @@ class STrack(BaseTrack):
         self.cls = cls
         self.idx = tlwh[-1]
 
+        self.xy_history = deque(maxlen=10)
+        self.movement_direction = TrackMovementDirection.DoesNotMove
+
     def predict(self):
         """Predicts mean and covariance using Kalman filter."""
         mean_state = self.mean.copy()
@@ -96,11 +106,27 @@ class STrack(BaseTrack):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
+    def determine_general_movement_direction(self):
+        """Determines general movement direction of detected object between frames."""
+        xy_center_history = [self.tlwh_to_xywh(tlwh)[:2] for tlwh in self.xy_history]
+        xy_center_history.reverse()
+
+        general_direction_vector_y_coord = np.add.reduce(np.diff(xy_center_history, axis=0))[-1]
+        
+        if -10 < general_direction_vector_y_coord < 10:
+            return TrackMovementDirection.DoesNotMove
+        elif general_direction_vector_y_coord > 10:
+            return TrackMovementDirection.Incoming
+        else:
+            return TrackMovementDirection.Outcoming
+    
     def activate(self, kalman_filter, frame_id):
         """Start a new tracklet."""
         self.kalman_filter = kalman_filter
         self.track_id = self.next_id()
         self.mean, self.covariance = self.kalman_filter.initiate(self.convert_coords(self._tlwh))
+
+        self.xy_history.appendleft(self._tlwh)
 
         self.tracklet_len = 0
         self.state = TrackState.Tracked
@@ -111,6 +137,11 @@ class STrack(BaseTrack):
 
     def re_activate(self, new_track, frame_id, new_id=False):
         """Reactivates a previously lost track with a new detection."""
+
+        self.xy_history.appendleft(new_track.tlwh)
+        if len(self.xy_history) == self.xy_history.maxlen:
+            self.movement_direction = self.determine_general_movement_direction()
+        
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
                                                                self.convert_coords(new_track.tlwh))
         self.tracklet_len = 0
@@ -134,6 +165,10 @@ class STrack(BaseTrack):
         self.frame_id = frame_id
         self.tracklet_len += 1
 
+        self.xy_history.appendleft(new_track.tlwh)
+        if len(self.xy_history) == self.xy_history.maxlen:
+            self.movement_direction = self.determine_general_movement_direction()
+
         new_tlwh = new_track.tlwh
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
                                                                self.convert_coords(new_tlwh))
@@ -143,7 +178,7 @@ class STrack(BaseTrack):
         self.score = new_track.score
         self.cls = new_track.cls
         self.idx = new_track.idx
-
+        
     def convert_coords(self, tlwh):
         """Convert a bounding box's top-left-width-height format to its x-y-angle-height equivalent."""
         return self.tlwh_to_xyah(tlwh)
@@ -165,6 +200,12 @@ class STrack(BaseTrack):
         ret[2:] += ret[:2]
         return ret
 
+    def tlwh_to_xywh(self, tlwh):
+        """Convert bounding box to format (center x, center y, width, height)."""
+        ret = np.asarray(tlwh).copy()
+        ret[:2] = (tlwh[:2] + (tlwh[2:] / 2).astype(int))
+        return ret
+        
     @staticmethod
     def tlwh_to_xyah(tlwh):
         """Convert bounding box to format (center x, center y, aspect ratio, height), where the aspect ratio is width /
@@ -347,7 +388,7 @@ class BYTETracker:
         if len(self.removed_stracks) > 1000:
             self.removed_stracks = self.removed_stracks[-999:]  # clip remove stracks to 1000 maximum
         return np.asarray(
-            [x.tlbr.tolist() + [x.track_id, x.score, x.cls, x.idx] for x in self.tracked_stracks if x.is_activated],
+            [x.tlbr.tolist() + [x.track_id, x.movement_direction, x.cls, x.idx] for x in self.tracked_stracks if x.is_activated],
             dtype=np.float32)
 
     def get_kalmanfilter(self):
