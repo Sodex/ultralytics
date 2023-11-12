@@ -62,8 +62,8 @@ class STrack(BaseTrack):
         self.cls = cls
         self.idx = tlwh[-1]
 
-        self.xy_history = deque(maxlen=10)
-        self.movement_direction = TrackMovementDirection.DoesNotMove
+        self.tlwh_history = deque(maxlen=10)
+        self.general_movement_direction = TrackMovementDirection.DoesNotMove
 
     def predict(self):
         """Predicts mean and covariance using Kalman filter."""
@@ -106,19 +106,13 @@ class STrack(BaseTrack):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
 
-    def determine_general_movement_direction(self):
+    def determine_general_movement_direction(self, tlwh_history):
         """Determines general movement direction of detected object between frames."""
-        xy_center_history = [self.tlwh_to_xywh(tlwh)[:2] for tlwh in self.xy_history]
-        xy_center_history.reverse()
-
-        general_direction_vector_y_coord = np.add.reduce(np.diff(xy_center_history, axis=0))[-1]
-        
-        if -10 < general_direction_vector_y_coord < 10:
-            return TrackMovementDirection.DoesNotMove
-        elif general_direction_vector_y_coord > 10:
-            return TrackMovementDirection.Incoming
-        else:
-            return TrackMovementDirection.Outcoming
+        xy_history = [self.tlwh_to_xywh(tlwh)[:2] for tlwh in tlwh_history]
+        general_direction_vector_ordinate = np.add.reduce(np.diff(xy_history, axis=0))[-1]
+        return TrackMovementDirection.DoesNotMove if -10 <= general_direction_vector_ordinate <= 10 \
+            else TrackMovementDirection.Incoming if general_direction_vector_ordinate < -10 \
+            else TrackMovementDirection.Outcoming
     
     def activate(self, kalman_filter, frame_id):
         """Start a new tracklet."""
@@ -126,7 +120,7 @@ class STrack(BaseTrack):
         self.track_id = self.next_id()
         self.mean, self.covariance = self.kalman_filter.initiate(self.convert_coords(self._tlwh))
 
-        self.xy_history.appendleft(self._tlwh)
+        self.tlwh_history.appendleft(self._tlwh)
 
         self.tracklet_len = 0
         self.state = TrackState.Tracked
@@ -138,9 +132,9 @@ class STrack(BaseTrack):
     def re_activate(self, new_track, frame_id, new_id=False):
         """Reactivates a previously lost track with a new detection."""
 
-        self.xy_history.appendleft(new_track.tlwh)
-        if len(self.xy_history) == self.xy_history.maxlen:
-            self.movement_direction = self.determine_general_movement_direction()
+        self.tlwh_history.appendleft(new_track.tlwh)
+        if len(self.tlwh_history) == self.tlwh_history.maxlen:
+            self.general_movement_direction = self.determine_general_movement_direction(self.tlwh_history)
         
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
                                                                self.convert_coords(new_track.tlwh))
@@ -165,9 +159,9 @@ class STrack(BaseTrack):
         self.frame_id = frame_id
         self.tracklet_len += 1
 
-        self.xy_history.appendleft(new_track.tlwh)
-        if len(self.xy_history) == self.xy_history.maxlen:
-            self.movement_direction = self.determine_general_movement_direction()
+        self.tlwh_history.appendleft(new_track.tlwh)
+        if len(self.tlwh_history) == self.tlwh_history.maxlen:
+            self.general_movement_direction = self.determine_general_movement_direction(self.tlwh_history)
 
         new_tlwh = new_track.tlwh
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
@@ -388,7 +382,7 @@ class BYTETracker:
         if len(self.removed_stracks) > 1000:
             self.removed_stracks = self.removed_stracks[-999:]  # clip remove stracks to 1000 maximum
         return np.asarray(
-            [x.tlbr.tolist() + [x.track_id, x.movement_direction, x.cls, x.idx] for x in self.tracked_stracks if x.is_activated],
+            [x.tlbr.tolist() + [x.track_id, x.general_movement_direction, x.cls, x.idx] for x in self.tracked_stracks if x.is_activated],
             dtype=np.float32)
 
     def get_kalmanfilter(self):
